@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """ Finetuning the library models for sequence classification on GLUE (Bert, XLM, XLNet, RoBERTa, Albert, XLM-RoBERTa)."""
-
+from comet_ml import Experiment
 
 import argparse
 import glob
@@ -64,11 +64,6 @@ from transformers import glue_output_modes as output_modes
 from transformers import glue_processors as processors
 
 
-try:
-    from torch.utils.tensorboard import SummaryWriter
-except ImportError:
-    from tensorboardX import SummaryWriter
-
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +107,16 @@ def set_seed(args):
 def train(args, train_dataset, model, tokenizer):
     """ Train the model """
     if args.local_rank in [-1, 0]:
-        tb_writer = SummaryWriter()
+        experiment = Experiment(api_key="c1oNUX2y6SqA972WTGzjRjDnf", project_name=args.task_name, workspace='modelcompression')
+        experiment.set_name(args.task_name + '.' + os.path.basename(args.output_dir))
+        experiment.log_parameters({
+            'per_gpu_train_batch_size': args.per_gpu_train_batch_size,
+            'max_seq_length': args.max_seq_length,
+            'model_name_or_path': args.model_name_or_path.split('/')[-2],
+            'n_epoch': args.num_train_epochs,
+            'task_name': args.task_name,
+            'learning_rate': args.learning_rate
+        })
 
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
     train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
@@ -202,7 +206,7 @@ def train(args, train_dataset, model, tokenizer):
         epochs_trained, int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0],
     )
     set_seed(args)  # Added here for reproductibility
-    for _ in train_iterator:
+    for epoch in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
         for step, batch in enumerate(epoch_iterator):
 
@@ -244,53 +248,53 @@ def train(args, train_dataset, model, tokenizer):
                 model.zero_grad()
                 global_step += 1
 
-                if args.local_rank in [-1, 0] and args.logging_steps > 0 and global_step % args.logging_steps == 0:
-                    logs = {}
-                    if (
-                        args.local_rank == -1 and args.evaluate_during_training
-                    ):  # Only evaluate when single GPU otherwise metrics may not average well
-                        results = evaluate(args, model, tokenizer)
-                        for key, value in results.items():
-                            eval_key = "eval_{}".format(key)
-                            logs[eval_key] = value
+                loss_scalar = (tr_loss - logging_loss) / args.logging_steps
+                learning_rate_scalar = scheduler.get_lr()[0]
 
-                    loss_scalar = (tr_loss - logging_loss) / args.logging_steps
-                    learning_rate_scalar = scheduler.get_lr()[0]
-                    logs["learning_rate"] = learning_rate_scalar
-                    logs["loss"] = loss_scalar
-                    logging_loss = tr_loss
+                logs = {}
+                logs["learning_rate"] = learning_rate_scalar
+                logs["loss_scalar"] = loss_scalar
+                logs["loss"] = loss.item()
+                logging_loss = tr_loss
+                for key, value in logs.items():
+                    experiment.log_metric(key, value, global_step)
 
-                    for key, value in logs.items():
-                        tb_writer.add_scalar(key, value, global_step)
-                    print(json.dumps({**logs, **{"step": global_step}}))
+                if args.max_steps > 0 and global_step > args.max_steps:
+                    epoch_iterator.close()
+                    break
 
-                if args.local_rank in [-1, 0] and args.save_steps > 0 and global_step % args.save_steps == 0:
-                    # Save model checkpoint
-                    output_dir = os.path.join(args.output_dir, "checkpoint-{}".format(global_step))
-                    if not os.path.exists(output_dir):
-                        os.makedirs(output_dir)
-                    model_to_save = (
-                        model.module if hasattr(model, "module") else model
-                    )  # Take care of distributed/parallel training
-                    model_to_save.save_pretrained(output_dir)
-                    tokenizer.save_pretrained(output_dir)
+        if args.local_rank in [-1, 0] :
+            if args.local_rank == -1 and args.evaluate_during_training:
+                results = evaluate(args, model, tokenizer)
+                logs = {}
+                for key, value in results.items():
+                    eval_key = "eval_{}".format(key)
+                    logs[eval_key] = value
+                for key, value in logs.items():
+                    experiment.log_metric(key, value, epoch)
+            print(json.dumps({**logs, **{"step": global_step}}))
 
-                    torch.save(args, os.path.join(output_dir, "training_args.bin"))
-                    logger.info("Saving model checkpoint to %s", output_dir)
+        if args.local_rank in [-1, 0]:
+            # Save model checkpoint
+            output_dir = os.path.join(args.output_dir, "checkpoint-{}".format(epoch))
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+            model_to_save = (
+                model.module if hasattr(model, "module") else model
+            )  # Take care of distributed/parallel training
+            model_to_save.save_pretrained(output_dir)
+            tokenizer.save_pretrained(output_dir)
 
-                    torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
-                    torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
-                    logger.info("Saving optimizer and scheduler states to %s", output_dir)
+            torch.save(args, os.path.join(output_dir, "training_args.bin"))
+            logger.info("Saving model checkpoint to %s", output_dir)
 
-            if args.max_steps > 0 and global_step > args.max_steps:
-                epoch_iterator.close()
-                break
+            torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
+            torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
+            logger.info("Saving optimizer and scheduler states to %s", output_dir)
+
         if args.max_steps > 0 and global_step > args.max_steps:
             train_iterator.close()
             break
-
-    if args.local_rank in [-1, 0]:
-        tb_writer.close()
 
     return global_step, tr_loss / global_step
 
