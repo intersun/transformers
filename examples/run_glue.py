@@ -190,6 +190,7 @@ def train(args, train_dataset, model, tokenizer):
         # set global_step to global_step of last saved checkpoint from model path
         try:
             global_step = int(args.model_name_or_path.split("-")[-1].split("/")[0])
+            global_step = 0
         except ValueError:
             global_step = 0
         epochs_trained = global_step // (len(train_dataloader) // args.gradient_accumulation_steps)
