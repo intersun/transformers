@@ -107,7 +107,8 @@ def set_seed(args):
 def train(args, train_dataset, model, tokenizer):
     """ Train the model """
     if args.local_rank in [-1, 0]:
-        experiment = Experiment(api_key="c1oNUX2y6SqA972WTGzjRjDnf", project_name=args.task_name, workspace='modelcompression')
+        project_name = '-'.join(args.model_name_or_path.split('/')[-2:])
+        experiment = Experiment(api_key="c1oNUX2y6SqA972WTGzjRjDnf", project_name=project_name, workspace='modelcompression')
         experiment.set_name(args.task_name + '.' + os.path.basename(args.output_dir))
         experiment.log_parameters({
             'per_gpu_train_batch_size': args.per_gpu_train_batch_size,
@@ -207,6 +208,7 @@ def train(args, train_dataset, model, tokenizer):
         epochs_trained, int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0],
     )
     set_seed(args)  # Added here for reproductibility
+    eval_res_log = open(os.path.join(args.output_dir, 'eval_log.txt'), 'w')
     for epoch in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
         for step, batch in enumerate(epoch_iterator):
@@ -264,7 +266,7 @@ def train(args, train_dataset, model, tokenizer):
                     epoch_iterator.close()
                     break
 
-        if args.local_rank in [-1, 0] :
+        if args.local_rank in [-1, 0]:
             if args.local_rank == -1 and args.evaluate_during_training:
                 results = evaluate(args, model, tokenizer)
                 logs = {}
@@ -273,30 +275,33 @@ def train(args, train_dataset, model, tokenizer):
                     logs[eval_key] = value
                 for key, value in logs.items():
                     experiment.log_metric(key, value, epoch)
-            print(json.dumps({**logs, **{"step": global_step}}))
+                print(json.dumps({**logs, **{"step": global_step}}), file=eval_res_log)
 
         if args.local_rank in [-1, 0]:
-            # Save model checkpoint
-            output_dir = os.path.join(args.output_dir, "checkpoint-{}".format(epoch))
-            if not os.path.exists(output_dir):
-                os.makedirs(output_dir)
-            model_to_save = (
-                model.module if hasattr(model, "module") else model
-            )  # Take care of distributed/parallel training
-            model_to_save.save_pretrained(output_dir)
-            tokenizer.save_pretrained(output_dir)
+            if not args.no_checkpoints:
+                # Save model checkpoint
+                output_dir = os.path.join(args.output_dir, "checkpoint-{}".format(epoch))
+                if not os.path.exists(output_dir):
+                    os.makedirs(output_dir)
 
-            torch.save(args, os.path.join(output_dir, "training_args.bin"))
-            logger.info("Saving model checkpoint to %s", output_dir)
+                torch.save(args, os.path.join(output_dir, "training_args.bin"))
+                logger.info("Saving model checkpoint to %s", output_dir)
 
-            torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
-            torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
-            logger.info("Saving optimizer and scheduler states to %s", output_dir)
+                model_to_save = (
+                    model.module if hasattr(model, "module") else model
+                )  # Take care of distributed/parallel training
+                model_to_save.save_pretrained(output_dir)
+                tokenizer.save_pretrained(output_dir)
+
+                torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
+                torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
+                logger.info("Saving optimizer and scheduler states to %s", output_dir)
 
         if args.max_steps > 0 and global_step > args.max_steps:
             train_iterator.close()
             break
 
+    eval_res_log.close()
     return global_step, tr_loss / global_step
 
 
@@ -546,6 +551,11 @@ def main():
         "--fp16",
         action="store_true",
         help="Whether to use 16-bit (mixed) precision (through NVIDIA apex) instead of 32-bit",
+    )
+    parser.add_argument(
+        "--no_checkpoints",
+        action="store_true",
+        help="Whether to save checkpoints or not",
     )
     parser.add_argument(
         "--fp16_opt_level",
