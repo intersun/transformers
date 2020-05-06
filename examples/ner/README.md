@@ -64,7 +64,6 @@ To start training, just run:
 
 ```bash
 python3 run_ner.py --data_dir ./ \
---model_type bert \
 --labels ./labels.txt \
 --model_name_or_path $BERT_MODEL \
 --output_dir $OUTPUT_DIR \
@@ -79,6 +78,29 @@ python3 run_ner.py --data_dir ./ \
 ```
 
 If your GPU supports half-precision training, just add the `--fp16` flag. After training, the model will be both evaluated on development and test datasets.
+
+### JSON-based configuration file
+
+Instead of passing all parameters via commandline arguments, the `run_ner.py` script also supports reading parameters from a json-based configuration file:
+
+```json
+{
+    "data_dir": ".",
+    "labels": "./labels.txt",
+    "model_name_or_path": "bert-base-multilingual-cased",
+    "output_dir": "germeval-model",
+    "max_seq_length": 128,
+    "num_train_epochs": 3,
+    "per_gpu_train_batch_size": 32,
+    "save_steps": 750,
+    "seed": 1,
+    "do_train": true,
+    "do_eval": true,
+    "do_predict": true
+}
+```
+
+It must be saved with a `.json` extension and can be used by running `python3 run_ner.py config.json`.
 
 #### Evaluation
 
@@ -112,13 +134,19 @@ Here is a small comparison between BERT (large, cased), RoBERTa (large, cased) a
 | `roberta-large`                  | 95.96 | 91.87
 | `distilbert-base-uncased` | 94.34 | 90.32
 
+#### Run PyTorch version using PyTorch-Lightning
+
+Run `bash run_pl.sh` from the `ner` directory. This would also install `pytorch-lightning` and the `examples/requirements.txt`. It is a shell pipeline which would automatically download, pre-process the data and run the models in `germeval-model` directory. Logs are saved in `lightning_logs` directory.
+
+Pass `--n_gpu` flag to change the number of GPUs. Default uses 1. At the end, the expected results are: `TEST RESULTS {'val_loss': tensor(0.0707), 'precision': 0.852427800698191, 'recall': 0.869537067011978, 'f1': 0.8608974358974358}`
+
+
 ### Run the Tensorflow 2 version
 
 To start training, just run:
 
 ```bash
 python3 run_tf_ner.py --data_dir ./ \
---model_type bert \
 --labels ./labels.txt \
 --model_name_or_path $BERT_MODEL \
 --output_dir $OUTPUT_DIR \
