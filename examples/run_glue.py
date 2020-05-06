@@ -107,7 +107,8 @@ def set_seed(args):
 def train(args, train_dataset, model, tokenizer):
     """ Train the model """
     if args.local_rank in [-1, 0]:
-        experiment = Experiment(api_key="c1oNUX2y6SqA972WTGzjRjDnf", project_name=args.task_name, workspace='modelcompression')
+        project_name = '-'.join(args.model_name_or_path.split('/')[-2:])
+        experiment = Experiment(api_key="c1oNUX2y6SqA972WTGzjRjDnf", project_name=project_name, workspace='modelcompression')
         experiment.set_name(args.task_name + '.' + os.path.basename(args.output_dir))
         experiment.log_parameters({
             'per_gpu_train_batch_size': args.per_gpu_train_batch_size,
@@ -190,6 +191,7 @@ def train(args, train_dataset, model, tokenizer):
         # set global_step to global_step of last saved checkpoint from model path
         try:
             global_step = int(args.model_name_or_path.split("-")[-1].split("/")[0])
+            global_step = 0
         except ValueError:
             global_step = 0
         epochs_trained = global_step // (len(train_dataloader) // args.gradient_accumulation_steps)
@@ -206,6 +208,7 @@ def train(args, train_dataset, model, tokenizer):
         epochs_trained, int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0],
     )
     set_seed(args)  # Added here for reproductibility
+    eval_res_log = open(os.path.join(args.output_dir, 'eval_log.txt'), 'w')
     for epoch in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
         for step, batch in enumerate(epoch_iterator):
@@ -263,7 +266,7 @@ def train(args, train_dataset, model, tokenizer):
                     epoch_iterator.close()
                     break
 
-        if args.local_rank in [-1, 0] :
+        if args.local_rank in [-1, 0]:
             if args.local_rank == -1 and args.evaluate_during_training:
                 results = evaluate(args, model, tokenizer)
                 logs = {}
@@ -272,30 +275,33 @@ def train(args, train_dataset, model, tokenizer):
                     logs[eval_key] = value
                 for key, value in logs.items():
                     experiment.log_metric(key, value, epoch)
-            print(json.dumps({**logs, **{"step": global_step}}))
+                print(json.dumps({**logs, **{"step": global_step}}), file=eval_res_log)
 
         if args.local_rank in [-1, 0]:
-            # Save model checkpoint
-            output_dir = os.path.join(args.output_dir, "checkpoint-{}".format(epoch))
-            if not os.path.exists(output_dir):
-                os.makedirs(output_dir)
-            model_to_save = (
-                model.module if hasattr(model, "module") else model
-            )  # Take care of distributed/parallel training
-            model_to_save.save_pretrained(output_dir)
-            tokenizer.save_pretrained(output_dir)
+            if not args.no_checkpoints:
+                # Save model checkpoint
+                output_dir = os.path.join(args.output_dir, "checkpoint-{}".format(epoch))
+                if not os.path.exists(output_dir):
+                    os.makedirs(output_dir)
 
-            torch.save(args, os.path.join(output_dir, "training_args.bin"))
-            logger.info("Saving model checkpoint to %s", output_dir)
+                torch.save(args, os.path.join(output_dir, "training_args.bin"))
+                logger.info("Saving model checkpoint to %s", output_dir)
 
-            torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
-            torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
-            logger.info("Saving optimizer and scheduler states to %s", output_dir)
+                model_to_save = (
+                    model.module if hasattr(model, "module") else model
+                )  # Take care of distributed/parallel training
+                model_to_save.save_pretrained(output_dir)
+                tokenizer.save_pretrained(output_dir)
+
+                torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
+                torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
+                logger.info("Saving optimizer and scheduler states to %s", output_dir)
 
         if args.max_steps > 0 and global_step > args.max_steps:
             train_iterator.close()
             break
 
+    eval_res_log.close()
     return global_step, tr_loss / global_step
 
 
@@ -336,7 +342,7 @@ def evaluate(args, model, tokenizer, prefix=""):
                 inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[3]}
                 if args.model_type != "distilbert":
                     inputs["token_type_ids"] = (
-                        batch[2] if args.model_type in ["bert", "xlnet", "albert"] else None
+                        batch[2] if args.model_type in ["bert", "xlnet", "albert", "glue"] else None
                     )  # XLM, DistilBERT, RoBERTa, and XLM-RoBERTa don't use segment_ids
                 outputs = model(**inputs)
                 tmp_eval_loss, logits = outputs[:2]
@@ -547,6 +553,11 @@ def main():
         help="Whether to use 16-bit (mixed) precision (through NVIDIA apex) instead of 32-bit",
     )
     parser.add_argument(
+        "--no_checkpoints",
+        action="store_true",
+        help="Whether to save checkpoints or not",
+    )
+    parser.add_argument(
         "--fp16_opt_level",
         type=str,
         default="O1",
@@ -650,16 +661,15 @@ def main():
 
     # Training
     if args.do_train:
+        # Create output directory if needed
+        if not os.path.exists(args.output_dir) and args.local_rank in [-1, 0]:
+            os.makedirs(args.output_dir)
         train_dataset = load_and_cache_examples(args, args.task_name, tokenizer, evaluate=False)
         global_step, tr_loss = train(args, train_dataset, model, tokenizer)
         logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
     # Saving best-practices: if you use defaults names for the model, you can reload it using from_pretrained()
     if args.do_train and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
-        # Create output directory if needed
-        if not os.path.exists(args.output_dir) and args.local_rank in [-1, 0]:
-            os.makedirs(args.output_dir)
-
         logger.info("Saving model checkpoint to %s", args.output_dir)
         # Save a trained model, configuration and tokenizer using `save_pretrained()`.
         # They can then be reloaded using `from_pretrained()`
@@ -680,23 +690,9 @@ def main():
     # Evaluation
     results = {}
     if args.do_eval and args.local_rank in [-1, 0]:
-        tokenizer = tokenizer_class.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
-        checkpoints = [args.output_dir]
-        if args.eval_all_checkpoints:
-            checkpoints = list(
-                os.path.dirname(c) for c in sorted(glob.glob(args.output_dir + "/**/" + WEIGHTS_NAME, recursive=True))
-            )
-            logging.getLogger("transformers.modeling_utils").setLevel(logging.WARN)  # Reduce logging
-        logger.info("Evaluate the following checkpoints: %s", checkpoints)
-        for checkpoint in checkpoints:
-            global_step = checkpoint.split("-")[-1] if len(checkpoints) > 1 else ""
-            prefix = checkpoint.split("/")[-1] if checkpoint.find("checkpoint") != -1 else ""
-
-            model = model_class.from_pretrained(checkpoint)
-            model.to(args.device)
-            result = evaluate(args, model, tokenizer, prefix=prefix)
-            result = dict((k + "_{}".format(global_step), v) for k, v in result.items())
-            results.update(result)
+        result = evaluate(args, model, tokenizer)
+        result = dict((k, v) for k, v in result.items())
+        results.update(result)
 
     return results
 
